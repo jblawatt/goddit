@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	_ "runtime"
 	"strings"
 	"time"
 )
@@ -292,7 +291,7 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 		RedditToken:   token,
 		OAuthURL:      "/reddit-login",
 	}
-	err := t.Execute(w, &tc)
+	err := t.Execute(w, tc)
 	if err != nil {
 		log.Println(err.Error())
 	}
@@ -495,8 +494,13 @@ func sessionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Println("entering session middleware")
 		session, _ := sessionStore.Get(r, "session-name")
+		// write to make sure the set cookie is set
+		session.Save(r, w)
+		session.Options.Secure = false
+		session.Options.HttpOnly = false
 		ctx := context.WithValue(r.Context(), sessionContextKey, session)
 		next.ServeHTTP(w, r.WithContext(ctx))
+		session.Values["___id"] = uuid.New().String()
 		session.Save(r, w)
 		log.Println("leavin session middleware. saved.")
 	})
@@ -541,6 +545,9 @@ func main() {
 	http.Handle("/", r)
 
 	log.Println("listening on ", redditConfig.Bind, "...")
-	http.ListenAndServe(redditConfig.Bind, nil)
+	err := http.ListenAndServe(redditConfig.Bind, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 }
