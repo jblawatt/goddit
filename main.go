@@ -32,8 +32,6 @@ const redditMeURL = "https://oauth.reddit.com/api/v1/me"
 const redditOAuthAuthorizeURL = "https://www.reddit.com/api/v1/authorize"
 const redditOAuthRevokeTokenURL = "https://www.reddit.com/api/v1/revoke_token"
 
-const redditOAuthCallbackURL = "http://localhost:8080/oauth-callback"
-
 const userAgentDefault = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36"
 
 const redditUserSessionKey = "redditUser"
@@ -88,7 +86,7 @@ func (t *RedditToken) BaseURL() string {
 type RedditConfig struct {
 	ClientID      string `yaml:"client_id"`
 	ClientSecret  string `yaml:"client_secret"`
-	OAuthCallback string `ymal:"oauth_callback"`
+	OAuthCallback string `yaml:"oauth_callback"`
 	SecretKey     string `yaml:"secret_key"`
 	Bind          string `yaml:"bind"`
 }
