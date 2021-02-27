@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.2/css/all.min.css" integrity="sha512-HK5fgLBL+xu6dm/Ii3z4xhlSUyZgTT9tuc/hSrtw6uzJOvgRr2a9jyxxT1ely+B+xFAmJKVSTbpM/CuL7qxO8w==" crossorigin="anonymous" />
+        <title>Goddit
+        </title>
+        <style>
+@import url('https://fonts.googleapis.com/css2?family=Akaya+Kanadaka&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@200;400&display=swap');
+
+body.invert {
+    background-color: black;
+    filter: invert(100%);
+}
+
+body {
+    font-family: "Georgia", serif;
+    /*font-family: 'Akaya Kanadaka', cursive;*/
+    /*font-family: 'Souce Sans Pro', monospace;*/
+}
+
+    h1, h2, h3 {
+        font-family: "Helvetica Neue", sans-serif;
+    }
+
+    .content {
+        margin: 0 auto;
+        max-width: 50em;
+    }
+
+    a, a:visited {
+        color: black;
+    }
+
+    a:visited {
+        font-style: italic;
+    }
+
+    a:hover {
+        background-color: #ededed;
+    }
+    .subreddit-menu-list li {
+        display: inline;
+    }
+
+    .subreddit-menu-list li:after {
+        content: "~";
+        color: #ff4500;
+    }
+
+    .subreddit-menu-list li.active{
+        font-weight: bold;
+    }
+
+    .subreddit-main-list li {
+        margin-bottom: 1.3em;
+    }
+
+    .subreddit-main-list--item .small {
+        font-size: 0.9em;
+    }
+
+    .subreddit-main-list--item .small a,
+    .subreddit-main-list--item .small {
+        color: grey;
+    }
+
+    .subreddit-main-list--item .small ul {
+        margin: 0;
+        padding: 0;
+    }
+    .subreddit-main-list--item .small ul li:after {
+        content: "|";
+    }
+    .subreddit-main-list--item .small ul li:last-child:after {
+        content: "";
+    }
+    .subreddit-main-list--item .small ul li {
+        display: inline;
+    }
+
+    .fa-reddit-alien {
+        color: #ff4500;
+    }
+
+    .login,
+    .logout {
+        float: right;
+    }
+
+    .thumbnail {
+        height: 80px;
+        width: 80px;
+        overflow: hidden;
+    }
+
+    .subtitle {
+        font-style: italic;
+        color: #ff4500;
+    }
+
+    /*
+       .wrapper {
+           display: grid;
+           grid-template-columns: auto 20%;
+       }
+     */
+
+        </style>
+    </head>
+
+    <body>
+        <div class="content">
+            <h1>Goddit
+                <i class="fab fa-reddit-alien"></i>
+            </h1>
+
+            <!--            <a href="/" class="logout">logout (jblawatt)</a>--->
+
+
+            {{ if .HasUser }}
+            <a href="/reddit-logout" class="logout">logout ({{.User.Name}})</a>
+            {{ else }}
+            <a href="{{.OAuthURL}}" class="login">login</a>
+            {{end}}
+
+
+            <p class="subtitle">the reader focused reddit client</p>
+
+
+            <ul class="subreddit-menu-list">
+                <li class="active">
+                    <a href="/best">best</a>
+                </li>
+
+
+                <li>
+                    <a href="/hot">hot</a>
+                </li>
+
+
+                <li>
+                    <a href="/new">new</a>
+                </li>
+
+
+                <li>
+                    <a href="/top">top</a>
+                </li>
+
+
+                <li>
+                    <a href="/rising">rising</a>
+                </li>
+                <li>
+                    <a href="/controversial">controversial</a>
+                </li>
+                {{if .HasUser }}
+                <select id="" name="" onchange="window.location.pathname = this.value">
+                    <option value="">---</option>
+                    {{range .Subscriptions}}
+                    <option value="{{.URL}}" {{if .Selected}}selected="1"{{end}}>{{.DisplayName}}</option>
+                    {{end}}
+                </select>
+                {{ end }}
+            </ul>
+
+
+            <ol class="subreddit-main-list">
+                {{range .ListData.Data.Children}}
+
+                <li class="subreddit-main-list--item">
+                    <div class="wrapper">
+                        <div class="subreddit-content">
+                            <a target="_blank" href="{{.Data.URL}}">{{.Data.Title}}</a>
+                            <div class="small">
+                                <ul>
+                                    <li>
+                                        <i class="fas fa-caret-up"></i>
+                                        {{.Data.Score}}
+                                    </li>
+                                    <li>
+                                        <a href="/{{.Data.SubredditNamePrefixed}}">{{.Data.SubredditNamePrefixed}}</a>
+                                    </li>
+                                    <li>
+                                        {{.Data.CreatedTime.Format "2006-01-02 15:04" }}
+                                    </li>
+                                    <li>
+                                        <a target="_blank"
+                                           href="https://www.reddit.com{{.Data.Permalink}}">comments</a>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <!--
+                            <div>
+                            {{ if .Data.Preview.Enabled }}
+                            <img src="{{.Data.URL}}" style="max-height: 200px" />
+                            {{end}}
+                            </div>
+                        -->
+                        <!--
+                            <div class="thumbnail"
+                            style="background-image: url('{{.Data.Thumbnail}}')" ></div>
+                        -->
+                    </div>
+                </li>
+                {{end}}
+            </ol>
+
+
+            <p><a href="?before={{.ListData.Data.Before}}">zurück</a> || <a href=
+                                                               "?after={{.ListData.Data.After}}">weiter</a></p>
+        </div>
+    </body>
+</html>
