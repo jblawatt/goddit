@@ -8,7 +8,6 @@ import (
 	"context"
 	hash "crypto/sha256"
 	"crypto/tls"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -86,13 +85,12 @@ func (t *RedditToken) BaseURL() string {
 
 // END REDDIT TOKEN ---------------------------------
 
-type RedditLoginConfig struct {
-	Username     string `yaml:"username"`
-	Password     string `yaml:"password"`
-	ClientID     string `yaml:"client_id"`
-	ClientSecret string `yaml:"client_secret"`
-	SecretKey    string `yaml:"secret_key"`
-	Bind         string `yaml:"bind"`
+type RedditConfig struct {
+	ClientID      string `yaml:"client_id"`
+	ClientSecret  string `yaml:"client_secret"`
+	OAuthCallback string `ymal:"oauth_callback"`
+	SecretKey     string `yaml:"secret_key"`
+	Bind          string `yaml:"bind"`
 }
 
 func DoRefreshToken(redditToken *RedditToken) {
@@ -104,7 +102,7 @@ func DoRefreshToken(redditToken *RedditToken) {
 
 	request, _ := http.NewRequest("POST", redditAccessTokenURL, strings.NewReader(data.Encode()))
 	request.Header.Add("User-Agent", userAgentDefault)
-	request.SetBasicAuth(redditLoginConfig.ClientID, redditLoginConfig.ClientSecret)
+	request.SetBasicAuth(redditConfig.ClientID, redditConfig.ClientSecret)
 	resp, _ := client.Do(request)
 	json.NewDecoder(resp.Body).Decode(&redditToken)
 	redditToken.Created = time.Now()
@@ -242,8 +240,7 @@ func DoRefreshMe(token RedditToken, redditUser *RedditUser) {
 	log.Println("user update completed")
 }
 
-//go:embed templates/index.html
-//var indexTemplate string
+var indexTemplate string
 
 func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("subreddit handler")
@@ -281,8 +278,13 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	var data RedditSubredditListingResponse
 	json.NewDecoder(resp.Body).Decode(&data)
 
-	t := template.Must(template.ParseGlob("templates/*.html"))
-	// t := template.Must(template.New("").Parse(indexTemplate))
+	var t *template.Template
+	if indexTemplate != "" {
+		t = template.Must(template.New("").Parse(indexTemplate))
+	} else {
+		// old style, read from templates
+		t = template.Must(template.ParseGlob("templates/*.html"))
+	}
 
 	tc := TemplateContext{
 		ListData:      data,
@@ -298,7 +300,7 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var redditLoginConfig RedditLoginConfig
+var redditConfig RedditConfig
 
 func ProcessRedditUser(token RedditToken, session *sessions.Session, user *RedditUser) {
 	userData := session.Values[redditUserSessionKey]
@@ -383,7 +385,7 @@ func redditOauthLogin(w http.ResponseWriter, r *http.Request) {
 
 	uid := uuid.New()
 	h := hash.New()
-	h.Write([]byte(redditLoginConfig.SecretKey))
+	h.Write([]byte(redditConfig.SecretKey))
 	h.Write([]byte(uid.String()))
 	state := hex.EncodeToString(h.Sum(nil))
 
@@ -392,10 +394,10 @@ func redditOauthLogin(w http.ResponseWriter, r *http.Request) {
 
 	oauthURL, _ := url.Parse(redditOAuthAuthorizeURL)
 	q := oauthURL.Query()
-	q.Add("client_id", redditLoginConfig.ClientID)
+	q.Add("client_id", redditConfig.ClientID)
 	q.Add("response_type", "code")
 	q.Add("state", state)
-	q.Add("redirect_uri", redditOAuthCallbackURL)
+	q.Add("redirect_uri", redditConfig.OAuthCallback)
 	q.Add("duration", "permanent")
 	q.Add("scope", "identity read mysubreddits")
 	oauthURL.RawQuery = q.Encode()
@@ -431,8 +433,6 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("oauth callback")
 
-	// fixme: error
-
 	q := r.URL.Query()
 	state := q.Get("state")
 	code := q.Get("code")
@@ -455,14 +455,14 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 	postData := url.Values{}
 	postData.Add("grant_type", "authorization_code")
 	postData.Add("code", code)
-	postData.Add("redirect_uri", redditOAuthCallbackURL)
+	postData.Add("redirect_uri", redditConfig.OAuthCallback)
 
 	req, _ := http.NewRequest(
 		"POST",
 		redditAccessTokenURL,
 		strings.NewReader(postData.Encode()),
 	)
-	req.SetBasicAuth(redditLoginConfig.ClientID, redditLoginConfig.ClientSecret)
+	req.SetBasicAuth(redditConfig.ClientID, redditConfig.ClientSecret)
 	req.Header.Add("User-Agent", userAgentDefault)
 	resp, _ := client.Do(req)
 	var token RedditToken
@@ -474,6 +474,8 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("created new reddit token. saving to session. struct=", token)
 	log.Println("created new reddit token. saving to session. json=", string(j))
+
+	delete(session.Values, redditStateSessionKey)
 
 	session.Save(r, w)
 
@@ -502,23 +504,25 @@ func sessionMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
-
+func setupDebugProxy() {
 	// config to use mitmproxy for more details
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	os.Setenv("http_proxy", "http://localhost:3128/")
 	os.Setenv("HTTP_PROXY", "http://localhost:3128/")
+}
+
+func main() {
 
 	f, _ := os.Open("config.yml")
 	defer f.Close()
-	yaml.NewDecoder(f).Decode(&redditLoginConfig)
+	yaml.NewDecoder(f).Decode(&redditConfig)
 
 	sessionStore, _ = sqlitestore.NewSqliteStore(
 		"./session.db",
 		"sessions",
 		"/",
 		3600,
-		[]byte(redditLoginConfig.SecretKey),
+		[]byte(redditConfig.SecretKey),
 	)
 
 	r := mux.NewRouter()
@@ -538,7 +542,7 @@ func main() {
 
 	http.Handle("/", r)
 
-	log.Println("listening on ", redditLoginConfig.Bind, "...")
-	http.ListenAndServe(redditLoginConfig.Bind, nil)
+	log.Println("listening on ", redditConfig.Bind, "...")
+	http.ListenAndServe(redditConfig.Bind, nil)
 
 }
