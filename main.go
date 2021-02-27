@@ -403,7 +403,7 @@ func redditOauthLogin(w http.ResponseWriter, r *http.Request) {
 
 	session.Save(r, w)
 
-	http.Redirect(w, r, oauthURL.String(), 303)
+	http.Redirect(w, r, oauthURL.String(), 302)
 
 }
 
@@ -423,7 +423,7 @@ func redditOauthLogout(w http.ResponseWriter, r *http.Request) {
 		delete(session.Values, redditTokenSessionKey)
 	}
 
-	http.Redirect(w, r, "/", 303)
+	http.Redirect(w, r, "/", 302)
 }
 
 func oauthCallback(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +476,7 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	session.Save(r, w)
 
-	http.Redirect(w, r, "/", 303)
+	http.Redirect(w, r, "/", 302)
 
 }
 
