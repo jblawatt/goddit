@@ -243,7 +243,7 @@ func DoRefreshMe(token RedditToken, redditUser *RedditUser) {
 }
 
 //go:embed templates/index.html
-var indexTemplate string
+//var indexTemplate string
 
 func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("subreddit handler")
@@ -281,8 +281,8 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	var data RedditSubredditListingResponse
 	json.NewDecoder(resp.Body).Decode(&data)
 
-	// t := template.Must(template.ParseGlob("templates/*.html"))
-	t := template.Must(template.Parse(indexTemplate))
+	t := template.Must(template.ParseGlob("templates/*.html"))
+	// t := template.Must(template.New("").Parse(indexTemplate))
 
 	tc := TemplateContext{
 		ListData:      data,
