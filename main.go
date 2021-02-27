@@ -8,13 +8,14 @@ import (
 	"context"
 	hash "crypto/sha256"
 	"crypto/tls"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	_ "github.com/gorilla/sessions"
+	"github.com/gorilla/sessions"
 	"github.com/michaeljs1990/sqlitestore"
 	"html/template"
 	"log"
@@ -26,15 +27,29 @@ import (
 	"time"
 )
 
-const RedditAccessTokenURL = "https://www.reddit.com/api/v1/access_token"
-const RedditSubredditsMineURL = "https://oauth.reddit.com/subreddits/mine"
-const RedditMeURL = "https://oauth.reddit.com/api/v1/me"
-const RedditOAuthAuthorizeURL = "https://www.reddit.com/api/v1/authorize"
-const RedditOAuthRevokeTokenURL = "https://www.reddit.com/api/v1/revoke_token"
+const redditAccessTokenURL = "https://www.reddit.com/api/v1/access_token"
+const redditSubredditsMineURL = "https://oauth.reddit.com/subreddits/mine"
+const redditMeURL = "https://oauth.reddit.com/api/v1/me"
+const redditOAuthAuthorizeURL = "https://www.reddit.com/api/v1/authorize"
+const redditOAuthRevokeTokenURL = "https://www.reddit.com/api/v1/revoke_token"
 
-const RedditOAuthCallbackURL = "http://localhost:8080/oauth-callback"
+const redditOAuthCallbackURL = "http://localhost:8080/oauth-callback"
 
-const UserAgentDefault = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36"
+const userAgentDefault = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36"
+
+const redditUserSessionKey = "redditUser"
+const redditSubsSessionKey = "redditSubs"
+const redditTokenSessionKey = "redditToken"
+const redditStateSessionKey = "redditState"
+
+type key int
+
+const (
+	sessionContextKey             key = iota
+	redditTokenContextKey         key = iota
+	redditUserContextKey          key = iota
+	redditSubscriptionsContextKey key = iota
+)
 
 // REDDIT TOKEN ------------------------------------
 
@@ -77,21 +92,23 @@ type RedditLoginConfig struct {
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret"`
 	SecretKey    string `yaml:"secret_key"`
+	Bind         string `yaml:"bind"`
 }
 
 func DoRefreshToken(redditToken *RedditToken) {
-	log.Println("refreshing token")
+	log.Println("updating token")
 	client := &http.Client{}
 	data := url.Values{}
 	data.Add("grant_type", "refresh_token")
 	data.Add("refresh_token", redditToken.AccessToken)
 
-	request, _ := http.NewRequest("POST", RedditAccessTokenURL, strings.NewReader(data.Encode()))
-	request.Header.Add("User-Agent", UserAgentDefault)
+	request, _ := http.NewRequest("POST", redditAccessTokenURL, strings.NewReader(data.Encode()))
+	request.Header.Add("User-Agent", userAgentDefault)
 	request.SetBasicAuth(redditLoginConfig.ClientID, redditLoginConfig.ClientSecret)
 	resp, _ := client.Do(request)
 	json.NewDecoder(resp.Body).Decode(&redditToken)
 	redditToken.Created = time.Now()
+	log.Println("token update complete")
 }
 
 type RedditSubredditImageResolution struct {
@@ -172,12 +189,12 @@ type RedditSubscriptionListingResponse struct {
 }
 
 func DoRefreshSubscriptions(token RedditToken, subs *RedditSubscriptionListingResponse) {
-	log.Println("refreshing subscriptions")
+	log.Println("updating subscriptions")
 
 	client := &http.Client{}
-	req, _ := http.NewRequest("GET", RedditSubredditsMineURL, nil)
+	req, _ := http.NewRequest("GET", redditSubredditsMineURL, nil)
 	req.Header.Add("Authorization", token.TokenType+" "+token.AccessToken)
-	req.Header.Add("User-Agent", UserAgentDefault)
+	req.Header.Add("User-Agent", userAgentDefault)
 
 	q := req.URL.Query()
 	q.Add("limit", "100")
@@ -186,6 +203,7 @@ func DoRefreshSubscriptions(token RedditToken, subs *RedditSubscriptionListingRe
 	resp, _ := client.Do(req)
 
 	json.NewDecoder(resp.Body).Decode(&subs)
+	log.Println("subscriptions update completed")
 }
 
 type SubscriptionViewModel struct {
@@ -213,22 +231,28 @@ type RedditUser struct {
 }
 
 func DoRefreshMe(token RedditToken, redditUser *RedditUser) {
+	log.Println("updating user")
 	client := &http.Client{}
-	req, _ := http.NewRequest("GET", RedditMeURL, nil)
+	req, _ := http.NewRequest("GET", redditMeURL, nil)
 	req.Header.Add("Authorization", token.TokenType+" "+token.AccessToken)
-	req.Header.Add("User-Agent", UserAgentDefault)
+	req.Header.Add("User-Agent", userAgentDefault)
 	resp, _ := client.Do(req)
 
 	json.NewDecoder(resp.Body).Decode(&redditUser)
+	log.Println("user update completed")
 }
+
+//go:embed templates/index.html
+var indexTemplate string
 
 func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("subreddit handler")
 
 	ctx := r.Context()
-	token, _ := ctx.Value("token").(RedditToken)
-	redditUser, userOk := ctx.Value("redditUser").(RedditUser)
-	subscriptions, subsOk := ctx.Value("redditSubscriptions").(RedditSubscriptionListingResponse)
+	token := ctx.Value(redditTokenContextKey).(RedditToken)
+	redditUser, userOk := ctx.Value(redditUserContextKey).(RedditUser)
+	subscriptions, _ := ctx.Value(redditSubscriptionsContextKey).(RedditSubscriptionListingResponse)
+
 	vars := mux.Vars(r)
 	subreddit := vars["subreddit"]
 	mainreddit := vars["mainreddit"]
@@ -246,8 +270,7 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Add("Authorization", token.TokenType+" "+token.AccessToken)
-	req.Header.Add("User-Agent", UserAgentDefault)
-
+	req.Header.Add("User-Agent", userAgentDefault)
 	q := req.URL.Query()
 	q.Add("limit", "100")
 	if after != "" {
@@ -257,11 +280,9 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	resp, _ := client.Do(req)
 	var data RedditSubredditListingResponse
 	json.NewDecoder(resp.Body).Decode(&data)
-	t := template.Must(template.ParseGlob("templates/*.html"))
 
-	if !subsOk {
-		subscriptions = RedditSubscriptionListingResponse{}
-	}
+	// t := template.Must(template.ParseGlob("templates/*.html"))
+	t := template.Must(template.Parse(indexTemplate))
 
 	tc := TemplateContext{
 		ListData:      data,
@@ -279,36 +300,61 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 
 var redditLoginConfig RedditLoginConfig
 
+func ProcessRedditUser(token RedditToken, session *sessions.Session, user *RedditUser) {
+	userData := session.Values[redditUserSessionKey]
+	if userData != nil {
+		json.Unmarshal([]byte(userData.(string)), &user)
+	} else {
+		DoRefreshMe(token, user)
+		j, _ := json.Marshal(user)
+		session.Values[redditUserSessionKey] = string(j)
+	}
+
+}
+
+func ProcessRedditSubscriptions(token RedditToken, session *sessions.Session, subs *RedditSubscriptionListingResponse) {
+	subsData := session.Values[redditSubsSessionKey]
+	if subsData != nil {
+		json.Unmarshal([]byte(subsData.(string)), &subs)
+	} else {
+		DoRefreshSubscriptions(token, subs)
+		j, _ := json.Marshal(subs)
+		session.Values[redditSubsSessionKey] = string(j)
+	}
+}
+
 func refreshRedditTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Println("entering reddit middleware")
 
-		session, _ := sessionStore.Get(r, "session-name")
-		token, tokenOk := session.Values["token"].(RedditToken)
-		if !tokenOk {
-			token = RedditToken{}
+		session, _ := r.Context().Value(sessionContextKey).(*sessions.Session)
+		tokenJson, tokenOk := session.Values[redditTokenSessionKey].(string)
+		var token RedditToken
+		if tokenOk {
+			json.Unmarshal([]byte(tokenJson), &token)
+			log.Println("existing reddit session: ", token)
+		} else {
+			log.Println("no reddit token, creating anonymous.")
 		}
-		inUse := token.InUse()
-		// fixme: not allways refresh
-		// expired := token.Expired()
 		ctx := r.Context()
 
-		if inUse {
-			log.Println("updating token")
-			DoRefreshToken(&token)
-			session.Values["token"] = token
-			session.Save(r, w)
+		if token.InUse() {
+			if token.Expired() {
+				DoRefreshToken(&token)
+				j, _ := json.Marshal(token)
+				session.Values[redditTokenSessionKey] = string(j)
+			}
 
 			var user RedditUser
-			DoRefreshMe(token, &user)
-			ctx = context.WithValue(ctx, "redditUser", user)
+			ProcessRedditUser(token, session, &user)
+			ctx = context.WithValue(ctx, redditUserContextKey, user)
 
 			var subs RedditSubscriptionListingResponse
-			DoRefreshSubscriptions(token, &subs)
-			ctx = context.WithValue(ctx, "redditSubscriptions", subs)
+			ProcessRedditSubscriptions(token, session, &subs)
+			ctx = context.WithValue(ctx, redditSubscriptionsContextKey, subs)
 		}
 
-		ctx = context.WithValue(ctx, "token", token)
+		ctx = context.WithValue(ctx, redditTokenContextKey, token)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -331,7 +377,7 @@ type OauthCallbackPayload struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func redditOauthInitiate(w http.ResponseWriter, r *http.Request) {
+func redditOauthLogin(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("initiate login")
 
@@ -341,19 +387,22 @@ func redditOauthInitiate(w http.ResponseWriter, r *http.Request) {
 	h.Write([]byte(uid.String()))
 	state := hex.EncodeToString(h.Sum(nil))
 
-	session, _ := sessionStore.Get(r, "session-name")
-	session.Values["redditState"] = state
-	session.Save(r, w)
+	session, _ := r.Context().Value(sessionContextKey).(*sessions.Session)
+	session.Values[redditStateSessionKey] = state
 
-	oauthURL, _ := url.Parse(RedditOAuthAuthorizeURL)
+	oauthURL, _ := url.Parse(redditOAuthAuthorizeURL)
 	q := oauthURL.Query()
 	q.Add("client_id", redditLoginConfig.ClientID)
 	q.Add("response_type", "code")
 	q.Add("state", state)
-	q.Add("redirect_uri", RedditOAuthCallbackURL)
+	q.Add("redirect_uri", redditOAuthCallbackURL)
 	q.Add("duration", "permanent")
 	q.Add("scope", "identity read mysubreddits")
 	oauthURL.RawQuery = q.Encode()
+
+	log.Println("redirecting to reddit ", redditOAuthAuthorizeURL)
+
+	session.Save(r, w)
 
 	http.Redirect(w, r, oauthURL.String(), 303)
 
@@ -361,21 +410,19 @@ func redditOauthInitiate(w http.ResponseWriter, r *http.Request) {
 
 func redditOauthLogout(w http.ResponseWriter, r *http.Request) {
 
-	session, _ := sessionStore.Get(r, "session-name")
-	token, tokenOk := session.Values["token"].(RedditToken)
+	token, tokenOk := r.Context().Value(redditTokenContextKey).(RedditToken)
+	session, sessionOk := r.Context().Value(redditTokenSessionKey).(*sessions.Session)
 
-	if tokenOk {
+	if sessionOk && tokenOk {
 		client := &http.Client{}
 		values := url.Values{}
 		values.Add("token", token.RefreshToken)
 		values.Add("token_type_hint", "refresh_token")
-		req, _ := http.NewRequest("POST", RedditOAuthRevokeTokenURL, strings.NewReader(values.Encode()))
+		req, _ := http.NewRequest("POST", redditOAuthRevokeTokenURL, strings.NewReader(values.Encode()))
 		client.Do(req)
+
+		delete(session.Values, redditTokenSessionKey)
 	}
-
-	delete(session.Values, "token")
-
-	session.Save(r, w)
 
 	http.Redirect(w, r, "/", 303)
 }
@@ -389,11 +436,18 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state := q.Get("state")
 	code := q.Get("code")
+	err := q.Get("error")
 
-	session, _ := sessionStore.Get(r, "session-name")
-	originState := session.Values["redditState"].(string)
+	session, _ := r.Context().Value(sessionContextKey).(*sessions.Session)
+
+	originState := session.Values[redditStateSessionKey].(string)
 	if state != originState {
 		fmt.Fprintln(w, "error: states are not equal")
+		return
+	}
+
+	if err != "" {
+		fmt.Fprintln(w, "error:", err)
 		return
 	}
 
@@ -401,28 +455,52 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 	postData := url.Values{}
 	postData.Add("grant_type", "authorization_code")
 	postData.Add("code", code)
-	postData.Add("redirect_uri", RedditOAuthCallbackURL)
+	postData.Add("redirect_uri", redditOAuthCallbackURL)
 
 	req, _ := http.NewRequest(
 		"POST",
-		RedditAccessTokenURL,
+		redditAccessTokenURL,
 		strings.NewReader(postData.Encode()),
 	)
 	req.SetBasicAuth(redditLoginConfig.ClientID, redditLoginConfig.ClientSecret)
-	req.Header.Add("User-Agent", UserAgentDefault)
+	req.Header.Add("User-Agent", userAgentDefault)
 	resp, _ := client.Do(req)
 	var token RedditToken
 	json.NewDecoder(resp.Body).Decode(&token)
 	token.Created = time.Now()
 
-	session.Values["token"] = token
+	j, _ := json.Marshal(token)
+	session.Values[redditTokenSessionKey] = string(j)
+
+	log.Println("created new reddit token. saving to session. struct=", token)
+	log.Println("created new reddit token. saving to session. json=", string(j))
 
 	session.Save(r, w)
+
 	http.Redirect(w, r, "/", 303)
 
 }
 
 var sessionStore *sqlitestore.SqliteStore
+
+func requestLogSeperatorMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println("-------------- REQUEST BEGIN ---------------")
+		next.ServeHTTP(w, r)
+		log.Println("-------------- REQUEST END   ---------------")
+	})
+}
+
+func sessionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println("entering session middleware")
+		session, _ := sessionStore.Get(r, "session-name")
+		ctx := context.WithValue(r.Context(), sessionContextKey, session)
+		next.ServeHTTP(w, r.WithContext(ctx))
+		session.Save(r, w)
+		log.Println("leavin session middleware. saved.")
+	})
+}
 
 func main() {
 
@@ -435,21 +513,32 @@ func main() {
 	defer f.Close()
 	yaml.NewDecoder(f).Decode(&redditLoginConfig)
 
-	// redditToken = login()
-	// redditSubscriptions = GetSubscribtions(redditToken)
-
-	sessionStore, _ = sqlitestore.NewSqliteStore("./session.db", "sessions", "/", 3600, []byte(redditLoginConfig.SecretKey))
+	sessionStore, _ = sqlitestore.NewSqliteStore(
+		"./session.db",
+		"sessions",
+		"/",
+		3600,
+		[]byte(redditLoginConfig.SecretKey),
+	)
 
 	r := mux.NewRouter()
-	r.Use(refreshRedditTokenMiddleware)
+	r.Use(requestLogSeperatorMiddleware)
+	r.Use(sessionMiddleware)
+
 	r.HandleFunc("/reddit-logout", redditOauthLogout)
-	r.HandleFunc("/reddit-login", redditOauthInitiate)
+	r.HandleFunc("/reddit-login", redditOauthLogin)
 	r.HandleFunc("/oauth-callback", oauthCallback).Methods("GET")
-	r.HandleFunc("/{mainreddit}", SubredditHandler)
-	r.HandleFunc("/r/{subreddit}", SubredditHandler)
-	r.HandleFunc("/r/{subreddit}/", SubredditHandler)
-	r.HandleFunc("/", SubredditHandler)
+
+	redditSessionRoutes := r.PathPrefix("/").Subrouter()
+	redditSessionRoutes.HandleFunc("/{mainreddit}", SubredditHandler)
+	redditSessionRoutes.HandleFunc("/r/{subreddit}", SubredditHandler)
+	redditSessionRoutes.HandleFunc("/r/{subreddit}/", SubredditHandler)
+	redditSessionRoutes.HandleFunc("/", SubredditHandler)
+	redditSessionRoutes.Use(refreshRedditTokenMiddleware)
+
 	http.Handle("/", r)
-	http.ListenAndServe("127.0.0.1:8080", nil)
+
+	log.Println("listening on ", redditLoginConfig.Bind, "...")
+	http.ListenAndServe(redditLoginConfig.Bind, nil)
 
 }
