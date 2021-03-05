@@ -16,8 +16,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/michaeljs1990/sqlitestore"
+	_ "github.com/patrickmn/go-cache"
+	log "github.com/sirupsen/logrus"
 	"html/template"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,7 +32,10 @@ const redditMeURL = "https://oauth.reddit.com/api/v1/me"
 const redditOAuthAuthorizeURL = "https://www.reddit.com/api/v1/authorize"
 const redditOAuthRevokeTokenURL = "https://www.reddit.com/api/v1/revoke_token"
 
-const userAgentDefault = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36"
+const redditOAuthBaseURL = "https://oauth.reddit.com"
+const redditAnonymousBaseURL = "https://www.reddit.com"
+
+const userAgentDefault = "linux:goddit2:0.0.1 by /u/jblawatt"
 
 const redditUserSessionKey = "redditUser"
 const redditSubsSessionKey = "redditSubs"
@@ -46,6 +50,8 @@ const (
 	redditUserContextKey          key = iota
 	redditSubscriptionsContextKey key = iota
 )
+
+var logger log.Logger
 
 // REDDIT TOKEN ------------------------------------
 
@@ -74,9 +80,9 @@ func (t *RedditToken) InUse() bool {
 
 func (t *RedditToken) BaseURL() string {
 	if t.InUse() {
-		return "https://oauth.reddit.com"
+		return redditOAuthBaseURL
 	} else {
-		return "https://www.reddit.com"
+		return redditAnonymousBaseURL
 	}
 }
 
@@ -88,6 +94,15 @@ type RedditConfig struct {
 	OAuthCallback string `yaml:"oauth_callback"`
 	SecretKey     string `yaml:"secret_key"`
 	Bind          string `yaml:"bind"`
+	SessionsDB    string `yaml:"sessions_db"`
+}
+
+func (rc *RedditConfig) HasSecretKey() bool {
+	return rc.SecretKey != ""
+}
+
+func (rc *RedditConfig) RedditLoginPossible() bool {
+	return rc.ClientID != "" && rc.ClientSecret != "" && rc.OAuthCallback != ""
 }
 
 func DoRefreshToken(redditToken *RedditToken) {
@@ -123,19 +138,38 @@ type RedditSubredditPreview struct {
 }
 
 type RedditSubredditListing struct {
-	Subreddit             string                 `json:"subreddit"`
-	Title                 template.HTML          `json:"title"`
-	SubredditNamePrefixed string                 `json:"subreddit_name_prefixed"`
-	URL                   string                 `json:"url"`
-	Ups                   int                    `json:"ups"`
-	Downs                 int                    `json:"downs"`
-	Score                 int                    `json:"score"`
-	Created               float64                `json:"created"`
-	Selftext              string                 `json:"selftext"`
-	SelftextHTML          template.HTML          `json:"selftext_html"`
-	Thumbnail             string                 `json:"thumbnail"`
-	Permalink             string                 `json:"permalink"`
-	Preview               RedditSubredditPreview `json:"preview"`
+	ID                    string        `json:"id"`
+	Subreddit             string        `json:"subreddit"`
+	Title                 template.HTML `json:"title"`
+	SubredditNamePrefixed string        `json:"subreddit_name_prefixed"`
+	URL                   string        `json:"url"`
+	Ups                   int           `json:"ups"`
+	Downs                 int           `json:"downs"`
+	Score                 int           `json:"score"`
+	Created               float64       `json:"created"`
+	Selftext              string        `json:"selftext"`
+	SelftextHTML          template.HTML `json:"selftext_html"`
+	Thumbnail             string        `json:"thumbnail"`
+	Permalink             string        `json:"permalink"`
+	// Preview               RedditSubredditPreview `json:"preview"`
+	NumComments int `json:"num_comments"`
+
+	Preview struct {
+		Enabled bool `json:"enabled"`
+		Images  []struct {
+			ID     string `json:"id"`
+			Source struct {
+				URL    string `json:"url"`
+				Width  int    `json:"width"`
+				Height int    `json:"height"`
+			} `json:"source"`
+		} `json:"images"`
+	} `json:"preview"`
+
+	// use
+	PostHint  string `json:"post_hint"`
+	Domain    string `json:"domain"`
+	MediaOnly string `json:"media_only"`
 }
 
 func (r *RedditSubredditListing) CreatedTime() time.Time {
@@ -243,7 +277,7 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("subreddit handler")
 
 	ctx := r.Context()
-	token := ctx.Value(redditTokenContextKey).(RedditToken)
+	token, _ := ctx.Value(redditTokenContextKey).(RedditToken)
 	redditUser, userOk := ctx.Value(redditUserContextKey).(RedditUser)
 	subscriptions, _ := ctx.Value(redditSubscriptionsContextKey).(RedditSubscriptionListingResponse)
 
@@ -251,19 +285,21 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 	subreddit := vars["subreddit"]
 	mainreddit := vars["mainreddit"]
 
-	url := token.BaseURL() + "/best.json"
+	redditURL := token.BaseURL() + "/best.json"
 	if mainreddit != "" {
-		url = token.BaseURL() + "/" + mainreddit + ".json"
+		redditURL = token.BaseURL() + "/" + mainreddit + ".json"
 	}
 
 	if subreddit != "" {
-		url = token.BaseURL() + "/r/" + subreddit + ".json"
+		redditURL = token.BaseURL() + "/r/" + subreddit + ".json"
 	}
 
 	after := r.URL.Query().Get("after")
 	client := &http.Client{}
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Add("Authorization", token.TokenType+" "+token.AccessToken)
+	req, _ := http.NewRequest("GET", redditURL, nil)
+	if token.TokenType != "" && token.AccessToken != "" {
+		req.Header.Add("Authorization", token.TokenType+" "+token.AccessToken)
+	}
 	req.Header.Add("User-Agent", userAgentDefault)
 	q := req.URL.Query()
 	q.Add("limit", "100")
@@ -271,29 +307,39 @@ func SubredditHandler(w http.ResponseWriter, r *http.Request) {
 		q.Add("after", after)
 	}
 	req.URL.RawQuery = q.Encode()
-	resp, _ := client.Do(req)
+	resp, rerr := client.Do(req)
+	if rerr != nil {
+		log.Errorln(resp.StatusCode)
+		log.Errorln(rerr.Error())
+	}
 	var data RedditSubredditListingResponse
 	json.NewDecoder(resp.Body).Decode(&data)
 
 	var t *template.Template
+	fmap := template.FuncMap{
+		"url_decode": func(value string) string {
+			return strings.ReplaceAll(value, "&amp;", "&")
+		},
+	}
 	if indexTemplate != "" {
 		t = template.Must(template.New("").Parse(indexTemplate))
 	} else {
 		// old style, read from templates
-		t = template.Must(template.ParseGlob("templates/*.html"))
+		t = template.Must(template.New("").Funcs(fmap).ParseGlob("templates/*.html"))
 	}
 
 	tc := TemplateContext{
 		ListData:      data,
 		Subscriptions: MakeSubscriptionsViewModel(subreddit, subscriptions),
 		User:          redditUser,
+		ProvideLogin:  redditConfig.RedditLoginPossible(),
 		HasUser:       userOk,
 		RedditToken:   token,
 		OAuthURL:      "/reddit-login",
 	}
-	err := t.Execute(w, tc)
+	err := t.ExecuteTemplate(w, "index.html", tc)
 	if err != nil {
-		log.Println(err.Error())
+		log.Errorln("error in template: ", err.Error())
 	}
 }
 
@@ -331,9 +377,9 @@ func refreshRedditTokenMiddleware(next http.Handler) http.Handler {
 		var token RedditToken
 		if tokenOk {
 			json.Unmarshal([]byte(tokenJson), &token)
-			log.Println("existing reddit session: ", token)
+			log.Debugln("existing reddit session: ", token)
 		} else {
-			log.Println("no reddit token, creating anonymous.")
+			log.Debugln("no reddit token, creating anonymous.")
 		}
 		ctx := r.Context()
 
@@ -366,6 +412,7 @@ type TemplateContext struct {
 	HasUser       bool
 	User          RedditUser
 	RedditToken   RedditToken
+	ProvideLogin  bool
 }
 
 type OauthCallbackPayload struct {
@@ -410,9 +457,9 @@ func redditOauthLogin(w http.ResponseWriter, r *http.Request) {
 func redditOauthLogout(w http.ResponseWriter, r *http.Request) {
 
 	token, tokenOk := r.Context().Value(redditTokenContextKey).(RedditToken)
-	session, sessionOk := r.Context().Value(redditTokenSessionKey).(*sessions.Session)
+	session, sessionOk := r.Context().Value(sessionContextKey).(*sessions.Session)
 
-	if sessionOk && tokenOk {
+	if tokenOk {
 		client := &http.Client{}
 		values := url.Values{}
 		values.Add("token", token.RefreshToken)
@@ -420,7 +467,13 @@ func redditOauthLogout(w http.ResponseWriter, r *http.Request) {
 		req, _ := http.NewRequest("POST", redditOAuthRevokeTokenURL, strings.NewReader(values.Encode()))
 		client.Do(req)
 
+	}
+
+	if sessionOk {
 		delete(session.Values, redditTokenSessionKey)
+		delete(session.Values, redditUserContextKey)
+		delete(session.Values, redditSubsSessionKey)
+		delete(session.Values, redditStateSessionKey)
 	}
 
 	http.Redirect(w, r, "/", 302)
@@ -428,7 +481,7 @@ func redditOauthLogout(w http.ResponseWriter, r *http.Request) {
 
 func oauthCallback(w http.ResponseWriter, r *http.Request) {
 
-	log.Println("oauth callback")
+	log.Debugln("oauth callback")
 
 	q := r.URL.Query()
 	state := q.Get("state")
@@ -469,9 +522,6 @@ func oauthCallback(w http.ResponseWriter, r *http.Request) {
 	j, _ := json.Marshal(token)
 	session.Values[redditTokenSessionKey] = string(j)
 
-	log.Println("created new reddit token. saving to session. struct=", token)
-	log.Println("created new reddit token. saving to session. json=", string(j))
-
 	delete(session.Values, redditStateSessionKey)
 
 	session.Save(r, w)
@@ -500,7 +550,6 @@ func sessionMiddleware(next http.Handler) http.Handler {
 		session.Options.HttpOnly = false
 		ctx := context.WithValue(r.Context(), sessionContextKey, session)
 		next.ServeHTTP(w, r.WithContext(ctx))
-		session.Values["___id"] = uuid.New().String()
 		session.Save(r, w)
 		log.Println("leavin session middleware. saved.")
 	})
@@ -513,38 +562,78 @@ func setupDebugProxy() {
 	os.Setenv("HTTP_PROXY", "http://localhost:3128/")
 }
 
+func defaultRedditConfig() RedditConfig {
+	return RedditConfig{
+		SecretKey:  "",
+		Bind:       "127.0.0.1:8080",
+		SessionsDB: "./session.db",
+	}
+}
+
+func validateConfig() {
+	// check for secret key
+	if !redditConfig.HasSecretKey() {
+		log.Warn("you do not use a secret key. please provide in config file (secret_key)")
+	}
+
+	if redditConfig.ClientID == "" {
+		log.Warn("you do not use the client id. you cannot login. please provide in config file (client_id)")
+	}
+
+	if redditConfig.ClientSecret == "" {
+		log.Warn("you do not use the client secret. you cannot login. please provide in config file (client_secert)")
+	}
+
+	if redditConfig.OAuthCallback == "" {
+		log.Warn("you do not use the oauth callback. you cannot login. please provide in config file (oauth_callback)")
+	}
+}
+
 func main() {
+
+	// setupDebugProxy()
+
+	log.SetFormatter(&log.TextFormatter{})
+	log.SetLevel(log.DebugLevel)
+
+	redditConfig = defaultRedditConfig()
 
 	f, _ := os.Open("config.yml")
 	defer f.Close()
 	yaml.NewDecoder(f).Decode(&redditConfig)
 
 	sessionStore, _ = sqlitestore.NewSqliteStore(
-		"./session.db",
+		redditConfig.SessionsDB,
 		"sessions",
 		"/",
 		3600,
 		[]byte(redditConfig.SecretKey),
 	)
 
+	validateConfig()
+
 	r := mux.NewRouter()
-	r.Use(requestLogSeperatorMiddleware)
 	r.Use(sessionMiddleware)
 
-	r.HandleFunc("/reddit-logout", redditOauthLogout)
-	r.HandleFunc("/reddit-login", redditOauthLogin)
-	r.HandleFunc("/oauth-callback", oauthCallback).Methods("GET")
+	if redditConfig.RedditLoginPossible() {
+		r.HandleFunc("/reddit-logout", redditOauthLogout)
+		r.HandleFunc("/reddit-login", redditOauthLogin)
+		r.HandleFunc("/oauth-callback", oauthCallback).Methods("GET")
+	}
 
 	redditSessionRoutes := r.PathPrefix("/").Subrouter()
 	redditSessionRoutes.HandleFunc("/{mainreddit}", SubredditHandler)
 	redditSessionRoutes.HandleFunc("/r/{subreddit}", SubredditHandler)
 	redditSessionRoutes.HandleFunc("/r/{subreddit}/", SubredditHandler)
 	redditSessionRoutes.HandleFunc("/", SubredditHandler)
-	redditSessionRoutes.Use(refreshRedditTokenMiddleware)
+
+	if redditConfig.RedditLoginPossible() {
+		redditSessionRoutes.Use(refreshRedditTokenMiddleware)
+	}
 
 	http.Handle("/", r)
 
-	log.Println("listening on ", redditConfig.Bind, "...")
+	log.Infoln("listening on ", redditConfig.Bind, "...")
 	err := http.ListenAndServe(redditConfig.Bind, nil)
 	if err != nil {
 		log.Fatal(err)

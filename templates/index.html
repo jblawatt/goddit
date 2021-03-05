@@ -101,12 +101,25 @@ body {
         color: #ff4500;
     }
 
-    /*
-       .wrapper {
-           display: grid;
-           grid-template-columns: auto 20%;
-       }
-     */
+
+    .preview-image-wrapper {
+        display: none;
+    }
+
+    .show-image-checkbox {
+        display: none;
+    }
+
+    .preview-image {
+        max-width: 100%;
+        margin: 15px 0 15px 0;
+        border: solid silver 1px;
+    }
+
+    .show-image-checkbox:checked + .preview-image-wrapper {
+        display: block !important;
+    }
+
 
         </style>
     </head>
@@ -117,14 +130,14 @@ body {
                 <i class="fab fa-reddit-alien"></i>
             </h1>
 
-            <!--            <a href="/" class="logout">logout (jblawatt)</a>--->
 
-
+            {{ if .ProvideLogin }}
             {{ if .HasUser }}
             <a href="/reddit-logout" class="logout">logout ({{.User.Name}})</a>
             {{ else }}
             <a href="{{.OAuthURL}}" class="login">login</a>
-            {{end}}
+            {{ end }}
+            {{ end }}
 
 
             <p class="subtitle">the reader focused reddit client</p>
@@ -189,18 +202,29 @@ body {
                                     </li>
                                     <li>
                                         <a target="_blank"
-                                           href="https://www.reddit.com{{.Data.Permalink}}">comments</a>
+                                           href="https://www.reddit.com{{.Data.Permalink}}">{{.Data.NumComments}} comments</a>
                                     </li>
+                                    {{ if eq .Data.PostHint "image" }}
+                                    <li>
+                                        <a
+                                            href="javascript:toggleCheckbox('show-image-checkbox-{{.Data.ID}}');">
+                                           show preview
+                                        </a>
+                                    </li>
+                                    {{ end }}
                                 </ul>
                             </div>
                         </div>
-                        <!--
-                            <div>
+                        <input type="checkbox"
+                               class="show-image-checkbox"
+                               id="show-image-checkbox-{{.Data.ID}}" />
+                            <div class="preview-image-wrapper">
                             {{ if .Data.Preview.Enabled }}
-                            <img src="{{.Data.URL}}" style="max-height: 200px" />
+                            <img
+                                src="{{url_decode (index .Data.Preview.Images 0).Source.URL}}"
+                                class="preview-image"/>
                             {{end}}
                             </div>
-                        -->
                         <!--
                             <div class="thumbnail"
                             style="background-image: url('{{.Data.Thumbnail}}')" ></div>
@@ -211,8 +235,23 @@ body {
             </ol>
 
 
-            <p><a href="?before={{.ListData.Data.Before}}">zurück</a> || <a href=
-                                                               "?after={{.ListData.Data.After}}">weiter</a></p>
+            <p>
+            {{ if .ListData.Data.Before }}
+                <a href="?before={{.ListData.Data.Before}}">zurück</a> |
+            {{ end }}
+                <a href="?after={{.ListData.Data.After}}">weiter</a>
+            </p>
         </div>
     </body>
+            <script>
+
+    function toggleCheckbox(id) {
+        var cb = document.getElementById(id);
+        if (cb != null) {
+            cb.checked = !cb.checked;
+        }
+        return false;
+    }
+
+            </script>
 </html>
